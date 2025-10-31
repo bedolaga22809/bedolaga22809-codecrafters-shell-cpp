@@ -60,6 +60,18 @@ int main() {
         else if(a == "\\delhistory") {
             delHistoryF(history);
         }
+        else if(a.find("echo ") == 0) {
+            std::string save = a;
+            std::string answ = a.substr(5);
+            std::cout << answ << std::endl;
+            //для корректного сохранения в истории
+            a = a.substr(0, 0);
+            std::ofstream file(history, std::ios::app);
+            if (file.is_open()) {
+                file << save << std::endl;
+                file.close();
+            }
+        }
         else {
             std::ofstream file(history, std::ios::app);
             if (file.is_open()) {
@@ -67,6 +79,7 @@ int main() {
                 file.close();
             }
         }
+
         std::cout << a << std::endl;
         std::cout << GREEN << "$ " << RESET;
 	}
