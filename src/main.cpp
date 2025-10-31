@@ -13,7 +13,7 @@ int main() {
 	while (true) {
 		std::getline(std::cin, a);
 
-		if (std::cin.eof()) {
+		if (std::cin.eof() || a == "\\q") {
 			break;
 		}
 		else {
