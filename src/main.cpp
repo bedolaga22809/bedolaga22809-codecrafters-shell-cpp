@@ -7,8 +7,18 @@ int main() {
 
 	std::cout << "$ ";
 
-	//печатаем введенную строку и выводим
+	//печатаем введенную строку и выводим в цикле
 	std::string a;
-	std::cin >> a;
-	std::cout << "введенная строка: " << a << std::endl;
+
+	while (true) {
+		std::getline(std::cin, a);
+
+		if (std::cin.eof()) {
+			break;
+		}
+		else {
+			std::cout << a << std::endl;
+			std::cout << "$ ";
+		}
+	}
 }
