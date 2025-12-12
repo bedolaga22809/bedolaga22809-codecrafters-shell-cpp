@@ -1,0 +1,8 @@
+#!/bin/bash
+# Post-installation script for kubsh
+echo 'kubsh has been installed successfully!'
+echo 'Type "kubsh" to start using it.'
+# Update man database
+if command -v mandb > /dev/null; then
+    mandb
+fi
