@@ -1,0 +1,10 @@
+Package: kubsh
+Version: 1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: libfuse3-4
+Maintainer: Your Name <your.email@example.com>
+Description: Kubernetes Shell
+ kubsh is a custom shell designed for Kubernetes operations.
+ It provides convenient commands for working with k8s clusters.

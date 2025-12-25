@@ -1,0 +1,17 @@
+#!/bin/bash
+# Post-installation script for kubsh
+
+# Create compatibility symlink for libfuse3.so.3 if it doesn't exist
+if [ ! -L /usr/lib/x86_64-linux-gnu/libfuse3.so.3 ] && [ ! -f /usr/lib/x86_64-linux-gnu/libfuse3.so.3 ]; then
+    if [ -f /usr/lib/x86_64-linux-gnu/libfuse3.so.4 ]; then
+        ln -s /usr/lib/x86_64-linux-gnu/libfuse3.so.4 /usr/lib/x86_64-linux-gnu/libfuse3.so.3 2>/dev/null || true
+        ldconfig || true
+    fi
+fi
+
+echo 'kubsh has been installed successfully!'
+echo 'Type "kubsh" to start using it.'
+# Update man database
+if command -v mandb > /dev/null; then
+    mandb
+fi
