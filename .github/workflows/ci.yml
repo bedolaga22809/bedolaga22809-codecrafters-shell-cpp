@@ -1,0 +1,56 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfuse3-dev build-essential
+    
+    - name: Build kubsh
+      run: make build
+    
+    - name: Create DEB package
+      run: make deb
+    
+    - name: Upload DEB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kubsh-deb
+        path: kubsh.deb
+        retention-days: 30
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download DEB artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: kubsh-deb
+    
+    - name: Run Docker tests
+      run: |
+        docker run -d -it --privileged --name kubsh_test tyvik/kubsh_test:master bash
+        sleep 2
+        docker cp kubsh.deb kubsh_test:/opt
+        docker exec kubsh_test dpkg -i /opt/kubsh.deb
+        docker exec kubsh_test pytest -v
+        docker stop kubsh_test || true
+        docker rm kubsh_test || true
