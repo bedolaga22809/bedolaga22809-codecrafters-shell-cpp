@@ -1,331 +1,213 @@
 #include <iostream>
-#include <string>
 #include <fstream>
-#include <cstdlib>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <sstream>
+#include <string>
 #include <vector>
+#include <unistd.h>
+#include <sstream>
+#include <csignal>
+#include <cstring>
 #include <filesystem>
-#include <thread>
-#include <chrono>
-#include <set>
-#include <poll.h>
-
-#define RESET   "\033[0m"
-#define GREEN   "\033[32m"
-
+#include <iomanip>
+#include <pwd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+using namespace std;
 namespace fs = std::filesystem;
 
-//поиск домашней папки
-std::string searchF() {
-    std::string home;
-    if(getenv("HOME")) {
-        home = getenv("HOME");
-    }
-    else {
-        home = ".";
-    }
-    return home;
-}
+// FUSE VFS functions
+extern "C" int start_users_vfs(const char *mount_point);
+extern "C" void stop_users_vfs();
 
-//итсория команд
-void historyF(std::string& history) {
-    std::ifstream file(history);
-    std::string strok;
-    std::cout << "история: " << std::endl;
-    while (std::getline(file, strok)){
-        std::cout << strok << std::endl;
+void handle_sighup(int sig) {
+    if (sig == SIGHUP) {
+        const char* msg = "Configuration reloaded\n";
+        write(STDOUT_FILENO, msg, 23);
     }
-    file.close();
-}
-
-//удаление истории
-void delHistoryF(std::string& history) {
-    std::remove(history.c_str());
-}
-
-//разбор строки на аргументы
-std::vector<std::string> parseArgs(const std::string& cmd) {
-    std::vector<std::string> args;
-    std::string current;
-    bool inQuote = false;
-    
-    for (size_t i = 0; i < cmd.length(); i++) {
-        char c = cmd[i];
-        if (c == '\'' || c == '"') {
-            inQuote = !inQuote;
-        }
-        else if (c == ' ' && !inQuote) {
-            if (!current.empty()) {
-                args.push_back(current);
-                current.clear();
-            }
-        }
-        else {
-            current += c;
-        }
-    }
-    if (!current.empty()) {
-        args.push_back(current);
-    }
-    return args;
-}
-
-//выполнение внешней команды
-void executeCommand(const std::string& cmd) {
-    std::vector<std::string> args = parseArgs(cmd);
-    if (args.empty()) return;
-    
-    pid_t pid = fork();
-    if (pid == 0) {
-        // дочерний процесс
-        std::vector<char*> argv;
-        for (auto& arg : args) {
-            argv.push_back(const_cast<char*>(arg.c_str()));
-        }
-        argv.push_back(nullptr);
-        
-        execvp(argv[0], argv.data());
-        // если execvp вернулся, команда не найдена
-        exit(1);
-    }
-    else if (pid > 0) {
-        // родительский процесс
-        int status;
-        waitpid(pid, &status, 0);
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 1) {
-            std::cout << args[0] << ": command not found" << std::endl;
-        }
-    }
-}
-
-//синхронизация VFS с /etc/passwd
-void syncVFS() {
-    const std::string vfsPath = "/opt/users";
-    
-    // проверяем существование и доступ
-    if (!fs::exists(vfsPath)) {
-        return;
-    }
-    
-    try {
-        // читаем существующие папки в VFS
-        std::set<std::string> vfsDirs;
-        for (const auto& entry : fs::directory_iterator(vfsPath)) {
-            if (entry.is_directory()) {
-                vfsDirs.insert(entry.path().filename().string());
-            }
-        }
-        
-        // читаем пользователей из /etc/passwd с shell
-        std::set<std::string> passwdUsers;
-        std::ifstream passwd("/etc/passwd");
-        std::string line;
-        while (std::getline(passwd, line)) {
-            if (line.find("sh") != std::string::npos && 
-                (line.find("/bin/bash") != std::string::npos || 
-                 line.find("/bin/sh") != std::string::npos ||
-                 line.find("/usr/bin/zsh") != std::string::npos)) {
-                size_t pos = line.find(':');
-                if (pos != std::string::npos) {
-                    std::string username = line.substr(0, pos);
-                    passwdUsers.insert(username);
-                }
-            }
-        }
-        passwd.close();
-        
-        // добавляем пользователей в /etc/passwd для новых папок СНАЧАЛА
-        for (const auto& dir : vfsDirs) {
-            if (passwdUsers.find(dir) == passwdUsers.end()) {
-                // добавляем нового пользователя
-                std::ofstream passwdOut("/etc/passwd", std::ios::app);
-                if (passwdOut.is_open()) {
-                    passwdOut << dir << ":x:1000:1000::/home/" << dir << ":/bin/bash" << std::endl;
-                    passwdOut.close();
-                }
-                passwdUsers.insert(dir);
-            }
-        }
-        
-        // теперь добавляем недостающие папки для пользователей из passwd
-        passwd.open("/etc/passwd");
-        while (std::getline(passwd, line)) {
-            if (line.find("sh") != std::string::npos && 
-                (line.find("/bin/bash") != std::string::npos || 
-                 line.find("/bin/sh") != std::string::npos ||
-                 line.find("/usr/bin/zsh") != std::string::npos)) {
-                std::vector<std::string> fields;
-                std::stringstream ss(line);
-                std::string field;
-                while (std::getline(ss, field, ':')) {
-                    fields.push_back(field);
-                }
-                
-                if (fields.size() >= 7) {
-                    std::string username = fields[0];
-                    std::string uid = fields[2];
-                    std::string home = fields[5];
-                    std::string shell = fields[6];
-                    
-                    if (vfsDirs.find(username) == vfsDirs.end()) {
-                        try {
-                            fs::create_directory(vfsPath + "/" + username);
-                        } catch (...) {}
-                    }
-                    
-                    // создаем файлы в папке пользователя
-                    std::string userPath = vfsPath + "/" + username;
-                    if (fs::exists(userPath)) {
-                        std::ofstream idFile(userPath + "/id");
-                        if (idFile.is_open()) {
-                            idFile << uid;
-                            idFile.close();
-                        }
-                        
-                        std::ofstream homeFile(userPath + "/home");
-                        if (homeFile.is_open()) {
-                            homeFile << home;
-                            homeFile.close();
-                        }
-                        
-                        std::ofstream shellFile(userPath + "/shell");
-                        if (shellFile.is_open()) {
-                            shellFile << shell;
-                            shellFile.close();
-                        }
-                    }
-                }
-            }
-        }
-        passwd.close();
-    } catch (...) {
-        // игнорируем все ошибки доступа
-    }
-}
-
-volatile sig_atomic_t sigReceived = 0;
-
-void signalHandler(int signum) {
-    sigReceived = signum;
 }
 
 int main() {
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
-    
-    // обработка сигналов
-    signal(SIGHUP, signalHandler);
-    
-    std::string homePapka = searchF();
-    std::string history = homePapka + "/.kubsh_history";
-    
-    // запускаем поток для мониторинга VFS
-    std::thread vfsThread([&]() {
-        while (true) {
-            syncVFS();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Initialize FUSE VFS for users directory
+    fs::path users_dir = fs::current_path() / "users";
+    try {
+        if (!fs::exists(users_dir)) {
+            fs::create_directories(users_dir);
         }
-    });
-    vfsThread.detach();
+    } catch (...) {}
     
-    std::cout << GREEN << "$ " << RESET << std::flush;
-    
-    while (true) {
-        // проверяем сигналы
-        if (sigReceived == SIGHUP) {
-            std::cout << std::endl << "Configuration reloaded" << std::endl;
-            std::cout << GREEN << "$ " << RESET << std::flush;
-            sigReceived = 0;
+    start_users_vfs(users_dir.string().c_str());
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_sighup;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGHUP, &sa, NULL);
+
+    cout << unitbuf;    
+    string input;
+   
+    const char* home_dir = getenv("HOME");
+    string history_file;
+   
+    if(home_dir !=nullptr) {
+    history_file = string(home_dir) + "/kubsh_history";
+    }
+    else history_file = "/kubsh_history";
+
+    while(true) {
+    if (isatty(STDIN_FILENO)) {
+        cout << "$ ";
+    }
+    if(!getline(cin, input)) {
+        if (cin.eof()) break;
+        cin.clear();
+        continue;
+    }
+    if(!input.empty()) {
+      vector<string> args;
+      string current_arg;
+      bool in_quotes = false;
+      for(char c : input) {
+          if(c == '\'') {
+              in_quotes = !in_quotes;
+          } else if(c == ' ' && !in_quotes) {
+              if(!current_arg.empty()) {
+                  args.push_back(current_arg);
+                  current_arg.clear();
+              }
+          } else {
+              current_arg += c;
+          }
+      }
+      if(!current_arg.empty()) args.push_back(current_arg);
+
+      if (args.empty()) continue;
+      string cmdName = args[0];
+
+      bool isBuiltin = false;
+      if(cmdName == "\\q" || cmdName == "history" || cmdName == "echo" || 
+         cmdName == "debug" || cmdName == "\\e" || cmdName == "\\l") {
+        isBuiltin = true;
+      }
+
+      if(!isBuiltin) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            vector<char*> c_args;
+            for(const auto& arg : args) {
+                c_args.push_back(const_cast<char*>(arg.c_str()));
+            }
+            c_args.push_back(nullptr);
+            
+            execvp(c_args[0], c_args.data());
+            cout << input << ": command not found" << endl;
+            exit(1);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+        } else {
+            cerr << "Fork failed" << endl;
         }
-        
-        // проверяем наличие данных для чтения
-        struct pollfd pfd;
-        pfd.fd = STDIN_FILENO;
-        pfd.events = POLLIN;
-        
-        int ret = poll(&pfd, 1, 100);
-        
-        if (ret > 0) {
-            std::string a;
-            std::getline(std::cin, a);
-            
-            if (std::cin.eof() || a == "\\q") {
-                break;
+        continue;
+      }
+    }
+
+    if(!input.empty() && input != "\\q" && input != "history") {
+    ofstream file(history_file, ios::app);
+    file << input << endl;
+    }
+    if(input == "\\q") {
+      stop_users_vfs();
+      return 0;
+    }
+    vector<string> args;
+    string current_arg;
+    bool in_quotes = false;
+    for(char c : input) {
+        if(c == '\'') {
+            in_quotes = !in_quotes;
+        } else if(c == ' ' && !in_quotes) {
+            if(!current_arg.empty()) {
+                args.push_back(current_arg);
+                current_arg.clear();
             }
-            else if (a == "history") {
-                historyF(history);
+        } else {
+            current_arg += c;
+        }
+    }
+    if(!current_arg.empty()) args.push_back(current_arg);
+
+    if(!args.empty() && (args[0] == "echo" || args[0] == "debug")) {
+        for(size_t i = 1; i < args.size(); ++i) {
+            cout << args[i] << (i == args.size() - 1 ? "" : " ");
+        }
+        cout << endl;
+    } 
+    else if(!args.empty() && args[0] == "\\e") {
+        if (args.size() > 1) {
+            string var = args[1];
+            if (var.size() > 0 && var[0] == '$') {
+                var = var.substr(1);
             }
-            else if(a == "delhis") {
-                delHistoryF(history);
-            }
-            else if(a.find("\\e ") == 0) {
-                // вывод переменных окружения
-                std::string varName = a.substr(3);
-                if (varName[0] == '$') {
-                    varName = varName.substr(1);
+            const char* env_val = getenv(var.c_str());
+            if (env_val) {
+                string val = env_val;
+                size_t start = 0;
+                size_t end = val.find(':');
+                while (end != string::npos) {
+                    cout << val.substr(start, end - start) << endl;
+                    start = end + 1;
+                    end = val.find(':', start);
                 }
-                const char* value = getenv(varName.c_str());
-                if (value) {
-                    std::cout << std::endl;  // перенос строки ДО вывода
-                    std::string val(value);
-                    // если PATH, то выводим построчно
-                    if (varName == "PATH") {
-                        std::stringstream ss(val);
-                        std::string path;
-                        while (std::getline(ss, path, ':')) {
-                            std::cout << path << std::endl;
-                        }
-                    }
-                    else {
-                        std::cout << val << std::endl;
-                    }
-                }
-            }
-            else if(a.find("debug ") == 0) {
-                std::string save = a;
-                std::string answ = a.substr(6);
-                // убираем кавычки если есть
-                if (!answ.empty() && answ.front() == '\'' && answ.back() == '\'') {
-                    answ = answ.substr(1, answ.length() - 2);
-                }
-                std::cout << std::endl << answ << std::endl;  // перенос строки ДО вывода
-                //для корректного сохранения в истории
-                std::ofstream file(history, std::ios::app);
-                if (file.is_open()) {
-                    file << save << std::endl;
-                    file.close();
-                }
-            }
-            else if(a.find("echo ") == 0) {
-                std::string save = a;
-                std::string answ = a.substr(5);
-                std::cout << std::endl << answ << std::endl;  // перенос строки ДО вывода
-                //для корректного сохранения в истории
-                std::ofstream file(history, std::ios::app);
-                if (file.is_open()) {
-                    file << save << std::endl;
-                    file.close();
-                }
-            }
-            else if (!a.empty()) {
-                // выполнение внешней команды
-                std::cout << std::endl;  // перенос строки перед выполнением команды
-                executeCommand(a);
-                std::ofstream file(history, std::ios::app);
-                if (file.is_open()) {
-                    file << a << std::endl;
-                    file.close();
-                }
-            }
-            
-            if (!std::cin.eof()) {
-                std::cout << GREEN << "$ " << RESET << std::flush;
+                cout << val.substr(start) << endl;
             }
         }
     }
+    else if(!args.empty() && args[0] == "\\l") {
+        if (args.size() < 2) {
+            cerr << "Usage: \\l <device>" << endl;
+        } else {
+            string device = args[1];
+            ifstream dev_file(device, ios::binary);
+            if (!dev_file) {
+                cerr << "Failed to open device: " << device << endl;
+            } else {
+                uint8_t mbr[512];
+                if (!dev_file.read(reinterpret_cast<char*>(mbr), 512)) {
+                    cerr << "Failed to read MBR" << endl;
+                } else {
+                    if (mbr[510] != 0x55 || mbr[511] != 0xAA) {
+                        cerr << "Invalid MBR signature" << endl;
+                    } else {
+                        cout << "Partition table for " << device << ":" << endl;
+                        cout << "Boot Start LBA Size Type" << endl;
+                        for (int i = 0; i < 4; ++i) {
+                            int offset = 446 + i * 16;
+                            uint8_t status = mbr[offset];
+                            uint8_t type = mbr[offset + 4];
+                            uint32_t lba_start = *reinterpret_cast<uint32_t*>(&mbr[offset + 8]);
+                            uint32_t size = *reinterpret_cast<uint32_t*>(&mbr[offset + 12]);
+                            
+                            cout << (status == 0x80 ? "*" : " ") << "    "
+                                 << setw(10) << lba_start << " "
+                                 << setw(10) << size << " "
+                                 << hex << setw(2) << setfill('0') << (int)type << dec << setfill(' ') << endl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if(input == "history") {
+      ifstream read_file(history_file);
+      string line;
+       while(getline(read_file, line)) {
+          cout << " " << line << endl;
+        }
+    }
+    else cout << input << endl;
+    }
     
+    stop_users_vfs();
     return 0;
 }
